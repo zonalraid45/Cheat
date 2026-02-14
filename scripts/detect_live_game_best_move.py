@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 import argparse
-import os
 import json
+import os
+import time
 
 import chess
 import chess.engine
@@ -21,7 +22,7 @@ def fetch_ongoing_games(username: str) -> list[dict]:
             "clocks": "true",
             "evals": "false",
             "opening": "false",
-            "moves": "false",
+            "moves": "true",
             "pgnInJson": "false",
         },
         headers={"Accept": "application/x-ndjson"},
@@ -77,7 +78,29 @@ def fallback_tv_match(username: str) -> list[dict]:
 
 
 def get_fen(game: dict) -> str | None:
-    return game.get("fen") or game.get("lastFen")
+    fen = game.get("fen") or game.get("lastFen")
+    if isinstance(fen, str) and fen.strip():
+        return fen.strip()
+
+    initial_fen = game.get("initialFen")
+    if not isinstance(initial_fen, str) or not initial_fen.strip() or initial_fen == "startpos":
+        board = chess.Board()
+    else:
+        try:
+            board = chess.Board(initial_fen)
+        except ValueError:
+            return None
+
+    moves = game.get("moves")
+    if not isinstance(moves, str):
+        return board.fen()
+
+    for san_move in moves.split():
+        try:
+            board.push_san(san_move)
+        except ValueError:
+            return None
+    return board.fen()
 
 
 def get_player_name(game: dict, color: str, default: str) -> str:
@@ -90,11 +113,23 @@ def get_player_name(game: dict, color: str, default: str) -> str:
     return default
 
 
+def format_game_end_message(username: str, board: chess.Board, is_user_white: bool) -> str:
+    outcome = board.outcome()
+    if outcome is None or outcome.winner is None:
+        return f"Game ended by draw({username} wins!)"
+
+    user_won = (outcome.winner == chess.WHITE and is_user_white) or (
+        outcome.winner == chess.BLACK and not is_user_white
+    )
+    return f"Game ended ({username} {'wins' if user_won else 'loses'}!)"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Detect live games and suggest best move.")
     parser.add_argument("--username", required=True, help="Lichess username to inspect")
     parser.add_argument("--stockfish-path", default=os.getenv("STOCKFISH_PATH", "stockfish"))
     parser.add_argument("--analysis-time", type=float, default=0.8)
+    parser.add_argument("--poll-seconds", type=float, default=3.0, help="Delay between live checks")
     args = parser.parse_args()
 
     username = args.username.strip()
@@ -104,55 +139,75 @@ def main() -> int:
     print(f"Detected account ({username})")
     print("Detecting games....")
 
-    games = fetch_ongoing_games(username)
-    analyzable_games = [game for game in games if get_fen(game)]
-
-    if not analyzable_games:
-        analyzable_games = fallback_tv_match(username)
-
-    if not analyzable_games:
-        print(f"No live game found for {username}.")
-        return 0
+    seen_positions: dict[str, str] = {}
 
     with chess.engine.SimpleEngine.popen_uci(args.stockfish_path) as engine:
-        for game in analyzable_games:
-            fen = get_fen(game)
-            if not fen:
+        while True:
+            games = fetch_ongoing_games(username)
+            analyzable_games = [game for game in games if get_fen(game)]
+
+            if not analyzable_games:
+                analyzable_games = fallback_tv_match(username)
+
+            if not analyzable_games:
+                print(f"No live game found for {username}.")
+                time.sleep(args.poll_seconds)
                 continue
 
-            game_id = game.get("id") or game.get("gameId") or "unknown"
-            white_name = get_player_name(game, "white", "White")
-            black_name = get_player_name(game, "black", "Black")
+            for game in analyzable_games:
+                fen = get_fen(game)
+                if not fen:
+                    continue
 
-            try:
-                board = chess.Board(fen)
-            except ValueError:
-                continue
+                game_id = game.get("id") or game.get("gameId") or "unknown"
+                if seen_positions.get(game_id) == fen:
+                    continue
 
-            info = engine.analyse(
-                board,
-                chess.engine.Limit(time=args.analysis_time),
-                multipv=2,
-            )
+                seen_positions[game_id] = fen
 
-            best_move = "N/A"
-            alt_move = "N/A"
+                white_name = get_player_name(game, "white", "White")
+                black_name = get_player_name(game, "black", "Black")
 
-            if isinstance(info, list) and info:
-                pv0 = info[0].get("pv", [])
-                pv1 = info[1].get("pv", []) if len(info) > 1 else []
-                if pv0:
-                    best_move = pv0[0].uci()
-                if pv1:
-                    alt_move = pv1[0].uci()
-            elif isinstance(info, dict):
-                pv = info.get("pv", [])
-                if pv:
-                    best_move = pv[0].uci()
+                try:
+                    board = chess.Board(fen)
+                except ValueError:
+                    continue
 
-            print(f"{white_name} vs {black_name} {game_id} detected")
-            print(f"Best move - {best_move}")
-            print(f"Alternative move - {alt_move}")
+                move_number = board.fullmove_number
+                side = "White" if board.turn == chess.WHITE else "Black"
+                print(f"{white_name} vs {black_name} {game_id} detected")
+                print(f"Move number - {move_number} ({side} to move)")
+
+                if board.is_game_over():
+                    is_user_white = white_name.lower() == username.lower()
+                    print(format_game_end_message(username, board, is_user_white))
+                    continue
+
+                info = engine.analyse(
+                    board,
+                    chess.engine.Limit(time=args.analysis_time),
+                    multipv=2,
+                )
+
+                best_move = "N/A"
+                alt_move = "N/A"
+
+                if isinstance(info, list) and info:
+                    pv0 = info[0].get("pv", [])
+                    pv1 = info[1].get("pv", []) if len(info) > 1 else []
+                    if pv0:
+                        best_move = pv0[0].uci()
+                    if pv1:
+                        alt_move = pv1[0].uci()
+                elif isinstance(info, dict):
+                    pv = info.get("pv", [])
+                    if pv:
+                        best_move = pv[0].uci()
+
+                print(f"Best move - {best_move}")
+                print(f"Alternative move - {alt_move}")
+
+            time.sleep(args.poll_seconds)
 
     return 0
 
