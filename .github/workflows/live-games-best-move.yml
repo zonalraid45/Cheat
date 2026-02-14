@@ -1,0 +1,46 @@
+name: Live Games Best Move Monitor
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'Lichess username to detect live games for'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  detect-live-games:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies and Stockfish
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests chess
+          sudo apt-get update
+          sudo apt-get install -y stockfish
+
+      - name: Detect live games and print best moves
+        env:
+          STOCKFISH_PATH: /usr/games/stockfish
+          INPUT_USERNAME: ${{ github.event.inputs.username }}
+          DEFAULT_USERNAME: Stone
+        run: |
+          USERNAME="${INPUT_USERNAME:-$DEFAULT_USERNAME}"
+          python scripts/detect_live_game_best_move.py \
+            --username "$USERNAME" \
+            --stockfish-path "$STOCKFISH_PATH"
