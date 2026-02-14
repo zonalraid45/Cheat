@@ -82,6 +82,8 @@ def get_fen(game: dict) -> str | None:
     if isinstance(fen, str) and fen.strip():
         return fen.strip()
 
+    # The user games endpoint often omits `fen` for ongoing games but provides
+    # `initialFen` + `moves`. Rebuild the current position when available.
     initial_fen = game.get("initialFen")
     if not isinstance(initial_fen, str) or not initial_fen.strip() or initial_fen == "startpos":
         board = chess.Board()
