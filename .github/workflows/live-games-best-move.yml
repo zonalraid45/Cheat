@@ -37,6 +37,6 @@ jobs:
           # If triggered manually use input, else default to 'Stone'
           USERNAME: ${{ github.event.inputs.username || 'Stone' }}
         run: |
-          python scripts/detect_live_game_best_move.py \
+          python -u scripts/detect_live_game_best_move.py \
             --username "$USERNAME" \
             --stockfish-path "$STOCKFISH_PATH"
