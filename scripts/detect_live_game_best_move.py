@@ -2,14 +2,12 @@
 import argparse
 import os
 import json
-
 import chess
 import chess.engine
 import requests
 
 LICHESS_USER_GAMES_URL = "https://lichess.org/api/games/user/{username}"
 LICHESS_TV_CHANNELS_URL = "https://lichess.org/api/tv/channels"
-
 
 def fetch_ongoing_games(username: str) -> list[dict]:
     """Fetch ongoing games for a user from Lichess public API."""
@@ -39,7 +37,6 @@ def fetch_ongoing_games(username: str) -> list[dict]:
         except Exception:
             continue
     return games
-
 
 def fallback_tv_match(username: str) -> list[dict]:
     """Fallback to featured TV games when direct ongoing feed has no analyzable games."""
@@ -75,14 +72,11 @@ def fallback_tv_match(username: str) -> list[dict]:
         matches.append(game)
     return matches
 
-
 def get_fen(game: dict) -> str | None:
     fen = game.get("fen") or game.get("lastFen")
     if isinstance(fen, str) and fen.strip():
         return fen.strip()
 
-    # The user games endpoint often omits `fen` for ongoing games but provides
-    # `initialFen` + `moves`. Rebuild the current position when available.
     initial_fen = game.get("initialFen")
     if not isinstance(initial_fen, str) or not initial_fen.strip() or initial_fen == "startpos":
         board = chess.Board()
@@ -103,7 +97,6 @@ def get_fen(game: dict) -> str | None:
             return None
     return board.fen()
 
-
 def get_player_name(game: dict, color: str, default: str) -> str:
     players = game.get("players", {})
     side = players.get(color, {})
@@ -112,7 +105,6 @@ def get_player_name(game: dict, color: str, default: str) -> str:
     if isinstance(name, str) and name.strip():
         return name.strip()
     return default
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Detect live games and suggest best move.")
@@ -153,33 +145,40 @@ def main() -> int:
             except ValueError:
                 continue
 
+            # MultiPV=2 allows us to see the top 2 best moves
             info = engine.analyse(
                 board,
                 chess.engine.Limit(time=args.analysis_time),
                 multipv=2,
             )
 
-            best_move = "N/A"
-            alt_move = "N/A"
+            # Determine Move Number and Format
+            # White moves are "1. e4", Black moves are "1... e5"
+            move_num = board.fullmove_number
+            prefix = f"{move_num}. " if board.turn == chess.WHITE else f"{move_num}... "
+
+            best_move_str = "N/A"
+            alt_move_str = "N/A"
 
             if isinstance(info, list) and info:
+                # Top move (best)
                 pv0 = info[0].get("pv", [])
-                pv1 = info[1].get("pv", []) if len(info) > 1 else []
                 if pv0:
-                    best_move = pv0[0].uci()
-                if pv1:
-                    alt_move = pv1[0].uci()
-            elif isinstance(info, dict):
-                pv = info.get("pv", [])
-                if pv:
-                    best_move = pv[0].uci()
+                    best_move_str = f"{prefix}{board.san(pv0[0])}"
+                
+                # Second best move (alt)
+                if len(info) > 1:
+                    pv1 = info[1].get("pv", [])
+                    if pv1:
+                        alt_move_str = f"{prefix}{board.san(pv1[0])}"
 
-            print(f"{white_name} vs {black_name} {game_id} detected")
-            print(f"Best move - {best_move}")
-            print(f"Alternative move - {alt_move}")
+            print(f"--- Game: {white_name} vs {black_name} ({game_id}) ---")
+            print(f"Current Turn: {'White' if board.turn == chess.WHITE else 'Black'}")
+            print(f"Best move       - {best_move_str}")
+            print(f"Alternative     - {alt_move_str}")
+            print("-" * (30 + len(white_name) + len(black_name)))
 
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
