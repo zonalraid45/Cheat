@@ -7,33 +7,66 @@ import chess
 import chess.engine
 import requests
 
-LICHESS_USER_GAMES_URL = "https://lichess.org/api/games/user/{username}"
-LICHESS_TV_CHANNELS_URL = "https://lichess.org/api/tv/channels"
+# Endpoints
+LICHESS_ONGOING_URL = "https://lichess.org/api/games/user/{username}"
 
 def fetch_ongoing_games(username: str) -> list[dict]:
+    """Fetch games and handle potential API quirks."""
     try:
+        # Use headers to force JSON format (NDJSON)
+        headers = {"Accept": "application/x-ndjson"}
+        params = {
+            "ongoing": "true",
+            "moves": "true",
+            "max": 5
+        }
         response = requests.get(
-            LICHESS_USER_GAMES_URL.format(username=username),
-            params={"ongoing": "true", "moves": "true"},
-            headers={"Accept": "application/x-ndjson"},
-            timeout=15,
+            LICHESS_ONGOING_URL.format(username=username),
+            params=params,
+            headers=headers,
+            timeout=15
         )
+        
+        if response.status_code == 429:
+            print("Rate limited by Lichess. Waiting...")
+            time.sleep(60)
+            return []
+
         response.raise_for_status()
-        return [json.loads(line) for line in response.text.splitlines() if line.strip()]
-    except Exception:
+        
+        # Parse NDJSON (line by line JSON)
+        games = []
+        for line in response.text.strip().split('\n'):
+            if line:
+                try:
+                    games.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return games
+    except Exception as e:
+        print(f"Error fetching games: {e}")
         return []
 
-def get_fen(game: dict) -> str | None:
-    initial_fen = game.get("initialFen", chess.STARTING_FEN)
-    board = chess.Board(initial_fen) if initial_fen != "startpos" else chess.Board()
+def get_current_board(game: dict) -> chess.Board:
+    """Reconstructs the board from the moves string."""
+    initial_fen = game.get("initialFen")
+    if not initial_fen or initial_fen == "startpos":
+        board = chess.Board()
+    else:
+        board = chess.Board(initial_fen)
+        
     moves = game.get("moves", "")
     if moves:
         for move in moves.split():
             try:
                 board.push_san(move)
-            except:
-                break
-    return board.fen()
+            except ValueError:
+                # If SAN fails, try UCI
+                try:
+                    board.push_uci(move)
+                except:
+                    continue
+    return board
 
 def main():
     parser = argparse.ArgumentParser()
@@ -41,29 +74,31 @@ def main():
     parser.add_argument("--stockfish-path", default="stockfish")
     args = parser.parse_args()
 
-    print(f"Monitoring games for {args.username}... (Ctrl+C to stop)")
+    print(f"Starting 6-hour monitor for user: {args.username}")
     
-    # Track last move seen for each game ID to avoid repeat output
-    last_seen_state = {} 
+    last_move_count = {} # game_id -> number of moves made
 
     with chess.engine.SimpleEngine.popen_uci(args.stockfish_path) as engine:
-        while True:
+        start_time = time.time()
+        # 6 hours = 21600 seconds
+        while (time.time() - start_time) < 21600:
             games = fetch_ongoing_games(args.username)
             
+            if not games:
+                # Optional: print a dot to show it's still running
+                pass
+
             for game in games:
                 game_id = game.get("id")
-                fen = get_fen(game)
-                if not fen: continue
-                
-                board = chess.Board(fen)
-                # Create a unique key for this game state (ID + current FEN)
-                current_state_key = f"{game_id}_{fen}"
+                moves_str = game.get("moves", "")
+                move_list = moves_str.split()
+                move_count = len(move_list)
 
-                # Only analyze and print if the board state has changed
-                if last_seen_state.get(game_id) != current_state_key:
-                    white_name = game.get("players", {}).get("white", {}).get("user", {}).get("name", "White")
-                    black_name = game.get("players", {}).get("black", {}).get("user", {}).get("name", "Black")
+                # Only output if the move count has changed (a new move was made)
+                if game_id not in last_move_count or last_move_count[game_id] != move_count:
+                    board = get_current_board(game)
                     
+                    # Analyze
                     info = engine.analyse(board, chess.engine.Limit(time=0.8), multipv=2)
                     
                     move_num = board.fullmove_number
@@ -72,18 +107,21 @@ def main():
                     best_move = "N/A"
                     alt_move = "N/A"
                     
-                    if isinstance(info, list) and len(info) > 0:
-                        best_move = f"{prefix}{board.san(info[0]['pv'][0])}"
-                        if len(info) > 1:
+                    if info:
+                        if len(info) > 0 and "pv" in info[0]:
+                            best_move = f"{prefix}{board.san(info[0]['pv'][0])}"
+                        if len(info) > 1 and "pv" in info[1]:
                             alt_move = f"{prefix}{board.san(info[1]['pv'][0])}"
 
-                    print(f"\n[NEW MOVE] {white_name} vs {black_name} ({game_id})")
-                    print(f"Best move:   {best_move}")
-                    print(f"Alternative: {alt_move}")
+                    print(f"\n--- NEW STATE: {game_id} ---")
+                    print(f"White: {game.get('players',{}).get('white',{}).get('user',{}).get('name')}")
+                    print(f"Black: {game.get('players',{}).get('black',{}).get('user',{}).get('name')}")
+                    print(f"Best Move:       {best_move}")
+                    print(f"Alternative:     {alt_move}")
                     
-                    last_seen_state[game_id] = current_state_key
+                    last_move_count[game_id] = move_count
 
-            time.sleep(5) # Check for new moves every 5 seconds
+            time.sleep(5) # Poll every 5 seconds
 
 if __name__ == "__main__":
     main()
