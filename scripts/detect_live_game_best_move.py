@@ -35,24 +35,20 @@ def fetch_ongoing_games(username: str):
 
         lines = r.text.strip().split("\n")
         games = [json.loads(line) for line in lines if line]
-
         return [g for g in games if g.get("status") == "started"]
 
     except Exception:
         return []
 
 
-def build_board_from_game(game: dict) -> chess.Board:
-    initial_fen = game.get("initialFen", chess.STARTING_FEN)
-
+def build_board(initial_fen, moves_str):
     if initial_fen == "startpos":
         board = chess.Board()
     else:
         board = chess.Board(initial_fen)
 
-    moves = game.get("moves", "")
-    if moves:
-        for move in moves.split():
+    if moves_str:
+        for move in moves_str.split():
             try:
                 board.push_uci(move)
             except Exception:
@@ -68,7 +64,9 @@ def main():
     args = parser.parse_args()
 
     target_user = args.username.lower()
-    last_state = {}
+
+    last_move_counts = {}      # store last known move count per game
+    last_printed_state = {}    # avoid duplicate output
 
     print(f"--- ACTIVE MONITORING: {args.username} ---")
 
@@ -82,25 +80,37 @@ def main():
                 game_id = game.get("id")
                 active_ids.append(game_id)
 
-                board = build_board_from_game(game)
-                move_count = len(board.move_stack)
+                initial_fen = game.get("initialFen", chess.STARTING_FEN)
+                moves_str = game.get("moves", "")
 
-                # Identify players
+                move_count = len(moves_str.split()) if moves_str else 0
+
+                # 🔥 Ignore regression to 0 if we already saw moves
+                if game_id in last_move_counts:
+                    if move_count < last_move_counts[game_id]:
+                        move_count = last_move_counts[game_id]
+                        continue
+
+                last_move_counts[game_id] = move_count
+
+                board = build_board(initial_fen, moves_str)
+
                 players = game.get("players", {})
-                white_name = players.get("white", {}).get("user", {}).get("name", "Unknown")
-                black_name = players.get("black", {}).get("user", {}).get("name", "Unknown")
+                white_name = players.get("white", {}).get("user", {}).get("name", "")
+                black_name = players.get("black", {}).get("user", {}).get("name", "")
 
                 is_white = white_name.lower() == target_user
                 user_color = chess.WHITE if is_white else chess.BLACK
                 opponent = black_name if is_white else white_name
 
-                # Determine turn using board
                 is_your_turn = (board.turn == user_color)
 
                 state_key = f"{game_id}_{move_count}"
 
+                full_move = (move_count // 2) + 1
+
                 if is_your_turn:
-                    if last_state.get(game_id) != state_key:
+                    if last_printed_state.get(game_id) != state_key:
 
                         info = engine.analyse(
                             board,
@@ -108,20 +118,16 @@ def main():
                             multipv=2
                         )
 
-                        full_move = (move_count // 2) + 1
                         prefix = (
                             f"{full_move}. "
                             if board.turn == chess.WHITE
                             else f"{full_move}... "
                         )
 
-                        best = "N/A"
+                        best = prefix + board.san(info[0]["pv"][0])
                         alt = "N/A"
-
-                        if info:
-                            best = prefix + board.san(info[0]["pv"][0])
-                            if len(info) > 1:
-                                alt = prefix + board.san(info[1]["pv"][0])
+                        if len(info) > 1:
+                            alt = prefix + board.san(info[1]["pv"][0])
 
                         print(f"\n[!] YOUR TURN vs {opponent} (Game: {game_id})")
                         print(f"Move:        {full_move}")
@@ -129,17 +135,18 @@ def main():
                         print(f"ALTERNATIVE: {alt}")
                         print(f"Link: https://lichess.org/{game_id}")
 
-                        last_state[game_id] = state_key
+                        last_printed_state[game_id] = state_key
 
                 else:
-                    if last_state.get(game_id) != "waiting":
-                        print(f"[*] Waiting for {opponent} in {game_id} (Move { (move_count // 2) + 1 })")
-                        last_state[game_id] = "waiting"
+                    if last_printed_state.get(game_id) != "waiting_" + game_id:
+                        print(f"[*] Waiting for {opponent} in {game_id} (Move {full_move})")
+                        last_printed_state[game_id] = "waiting_" + game_id
 
-            # Clean cache for finished games
-            for gid in list(last_state.keys()):
+            # cleanup finished games
+            for gid in list(last_move_counts.keys()):
                 if gid not in active_ids:
-                    last_state.pop(gid, None)
+                    last_move_counts.pop(gid, None)
+                    last_printed_state.pop(gid, None)
 
             time.sleep(1.5)
 
