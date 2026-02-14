@@ -20,22 +20,17 @@ def fetch_ongoing_games(username: str) -> list[dict]:
             time.sleep(30)
             return []
             
-        lines = response.text.strip().split('\n')
-        games = [json.loads(line) for line in lines if line]
-        # ONLY return games that are currently in progress
-        return [g for g in games if g.get("status") == "started"]
+        return [json.loads(line) for line in response.text.strip().split('\n') if line]
     except Exception:
         return []
 
 def get_current_board(game: dict) -> chess.Board:
     initial_fen = game.get("initialFen", chess.STARTING_FEN)
-    # Handle "startpos" string vs actual FEN
     board = chess.Board(initial_fen) if initial_fen != "startpos" else chess.Board()
     moves = game.get("moves", "")
     if moves:
         for move in moves.split():
             try:
-                # Try SAN first, then UCI
                 board.push_san(move)
             except:
                 try: board.push_uci(move)
@@ -49,46 +44,41 @@ def main():
     args = parser.parse_args()
 
     target_user = args.username.lower()
-    last_processed_state = {} 
+    # Cache to store the last move count we analyzed for each game
+    last_analyzed_count = {} 
 
-    print(f"--- Monitoring ACTIVE Games for: {args.username} ---")
+    print(f"--- ACTIVE MONITORING: {args.username} ---")
 
     with chess.engine.SimpleEngine.popen_uci(args.stockfish_path) as engine:
         while True:
             games = fetch_ongoing_games(args.username)
+            active_games = [g for g in games if g.get("status") == "started"]
             
-            # Keep track of active IDs to clean up the cache later
-            active_game_ids = []
+            if not active_games:
+                print("No active games found. Waiting...", end="\r")
 
-            for game in games:
+            for game in active_games:
                 game_id = game.get("id")
-                active_game_ids.append(game_id)
                 board = get_current_board(game)
+                move_count = len(board.move_stack)
                 
                 # Identify players
                 players = game.get("players", {})
-                white_name = players.get("white", {}).get("user", {}).get("name", "Unknown")
-                black_name = players.get("black", {}).get("user", {}).get("name", "Unknown")
+                w_name = players.get("white", {}).get("user", {}).get("name", "Unknown")
+                b_name = players.get("black", {}).get("user", {}).get("name", "Unknown")
                 
-                # Determine your color
-                is_white = white_name.lower() == target_user
+                is_white = w_name.lower() == target_user
                 user_color = chess.WHITE if is_white else chess.BLACK
-                opponent_name = black_name if is_white else white_name
+                opponent = b_name if is_white else w_name
 
-                # Verification: Is it actually your turn based on the board?
-                is_your_turn = (board.turn == user_color)
-                
-                move_count = len(board.move_stack)
-                state_key = f"{game_id}_{move_count}"
-
-                if is_your_turn:
-                    # Only analyze if this is a NEW move state for your turn
-                    if last_processed_state.get(game_id) != state_key:
-                        # Analysis time 0.8s (range 0.5s - 1.0s)
+                # Logic: Is it YOUR turn according to the board state?
+                if board.turn == user_color:
+                    # Only analyze if we haven't analyzed this specific move count yet
+                    if last_analyzed_count.get(game_id) != move_count:
+                        # Analysis time set to 0.8s
                         info = engine.analyse(board, chess.engine.Limit(time=0.8), multipv=2)
                         
                         full_move = board.fullmove_number
-                        # Proper notation for White (7.) vs Black (7...)
                         prefix = f"{full_move}. " if board.turn == chess.WHITE else f"{full_move}... "
                         
                         best_move = "N/A"
@@ -98,26 +88,20 @@ def main():
                             if len(info) > 1:
                                 alt_move = f"{prefix}{board.san(info[1]['pv'][0])}"
 
-                        print(f"\n[!] YOUR TURN vs {opponent_name}")
-                        print(f"Move Number: {full_move}")
-                        print(f"Best:        {best_move}")
-                        print(f"Alternative: {alt_move}")
+                        print(f"\n[!] YOUR TURN vs {opponent} (Game: {game_id})")
+                        print(f"Current Move: {full_move}")
+                        print(f"STOCKFISH:   {best_move}")
+                        print(f"ALTERNATIVE: {alt_move}")
                         print(f"Link: https://lichess.org/{game_id}")
                         
-                        last_processed_state[game_id] = state_key
+                        last_analyzed_count[game_id] = move_count
                 else:
-                    # It's the opponent's turn. 
-                    # If we weren't already waiting, show status.
-                    if last_processed_state.get(game_id) != "waiting":
-                        print(f"[*] {opponent_name} is thinking in game {game_id}...")
-                        last_processed_state[game_id] = "waiting"
+                    # It's the opponent's turn
+                    if last_analyzed_count.get(game_id) != "waiting":
+                        print(f"[*] Waiting for {opponent} in {game_id} (Move {board.fullmove_number})")
+                        last_analyzed_count[game_id] = "waiting"
 
-            # Clean up cache for games that are no longer in the 'ongoing' list
-            keys_to_remove = [k for k in last_processed_state if k not in active_game_ids and "_" not in k]
-            for k in keys_to_remove:
-                last_processed_state.pop(k, None)
-
-            time.sleep(1.5) 
+            time.sleep(1.0) # Faster polling (1 second)
 
 if __name__ == "__main__":
     main()
