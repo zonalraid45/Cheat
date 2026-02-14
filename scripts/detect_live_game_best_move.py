@@ -21,7 +21,7 @@ def fetch_ongoing_games(username: str) -> list[dict]:
             "clocks": "true",
             "evals": "false",
             "opening": "false",
-            "moves": "false",
+            "moves": "true",
             "pgnInJson": "false",
         },
         headers={"Accept": "application/x-ndjson"},
@@ -77,7 +77,31 @@ def fallback_tv_match(username: str) -> list[dict]:
 
 
 def get_fen(game: dict) -> str | None:
-    return game.get("fen") or game.get("lastFen")
+    fen = game.get("fen") or game.get("lastFen")
+    if isinstance(fen, str) and fen.strip():
+        return fen.strip()
+
+    # The user games endpoint often omits `fen` for ongoing games but provides
+    # `initialFen` + `moves`. Rebuild the current position when available.
+    initial_fen = game.get("initialFen")
+    if not isinstance(initial_fen, str) or not initial_fen.strip() or initial_fen == "startpos":
+        board = chess.Board()
+    else:
+        try:
+            board = chess.Board(initial_fen)
+        except ValueError:
+            return None
+
+    moves = game.get("moves")
+    if not isinstance(moves, str):
+        return board.fen()
+
+    for san_move in moves.split():
+        try:
+            board.push_san(san_move)
+        except ValueError:
+            return None
+    return board.fen()
 
 
 def get_player_name(game: dict, color: str, default: str) -> str:
