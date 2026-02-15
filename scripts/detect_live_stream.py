@@ -3,6 +3,7 @@
 import argparse
 import os
 import json
+import time
 import threading
 import requests
 import chess
@@ -66,16 +67,21 @@ def player_name(player):
     return player.get("name") or player.get("id") or "Unknown"
 
 
-def stream_game_lines(game_id, headers):
+def stream_game_lines(game_id, headers, attempts=8, delay_seconds=1.5):
     endpoints = [BOT_GAME_STREAM.format(game_id), BOARD_GAME_STREAM.format(game_id)]
-    for endpoint in endpoints:
-        try:
-            response = requests.get(endpoint, headers=headers, stream=True, timeout=60)
-            if response.status_code == 200:
-                return response.iter_lines(), response
-            response.close()
-        except Exception:
-            continue
+    for attempt in range(1, attempts + 1):
+        for endpoint in endpoints:
+            try:
+                response = requests.get(endpoint, headers=headers, stream=True, timeout=60)
+                if response.status_code == 200:
+                    return response.iter_lines(), response
+                response.close()
+            except Exception:
+                continue
+
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+
     return None, None
 
 
