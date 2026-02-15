@@ -67,28 +67,22 @@ def player_name(player):
     return player.get("name") or player.get("id") or "Unknown"
 
 
-def stream_game_lines(game_id, headers, attempts=30, delay_seconds=2.0):
+def stream_game_lines(game_id, headers, attempts=8, delay_seconds=1.5):
     endpoints = [BOT_GAME_STREAM.format(game_id), BOARD_GAME_STREAM.format(game_id)]
-    last_error = None
-
     for attempt in range(1, attempts + 1):
         for endpoint in endpoints:
             try:
                 response = requests.get(endpoint, headers=headers, stream=True, timeout=60)
                 if response.status_code == 200:
-                    return response.iter_lines(), response, None
-
-                # Keep a compact diagnostic so failures are actionable.
-                body = response.text[:200].replace("\n", " ") if response.text else ""
-                last_error = f"HTTP {response.status_code} from {endpoint}: {body}".strip()
+                    return response.iter_lines(), response
                 response.close()
-            except Exception as exc:
-                last_error = f"{endpoint}: {exc}"
+            except Exception:
+                continue
 
         if attempt < attempts:
             time.sleep(delay_seconds)
 
-    return None, None, last_error
+    return None, None
 
 
 def stream_game(game_id, token, username, engine_path):
