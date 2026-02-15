@@ -9,7 +9,8 @@ import chess
 import chess.engine
 
 EVENT_STREAM = "https://lichess.org/api/stream/event"
-GAME_STREAM = "https://lichess.org/api/bot/game/stream/{}"
+BOT_GAME_STREAM = "https://lichess.org/api/bot/game/stream/{}"
+BOARD_GAME_STREAM = "https://lichess.org/api/board/game/stream/{}"
 ACCOUNT_INFO = "https://lichess.org/api/account"
 ACTIVE_GAMES = "https://lichess.org/api/account/playing"
 
