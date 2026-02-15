@@ -55,6 +55,8 @@ def get_active_game_ids(token):
 def get_token_scopes(token):
     try:
         response = requests.get(TOKEN_TEST, headers=auth_headers(token), timeout=15)
+        if response.status_code == 404:
+            return []
         response.raise_for_status()
         data = response.json()
         scopes = data.get("scopes")
@@ -83,6 +85,22 @@ def player_name(player):
     if not isinstance(player, dict):
         return "Unknown"
     return player.get("name") or player.get("id") or "Unknown"
+
+
+def format_eval(score, pov_color):
+    if score is None:
+        return ""
+
+    pov_score = score.pov(pov_color)
+    mate_score = pov_score.mate()
+    if mate_score is not None:
+        return f"M{mate_score:+d}"
+
+    centipawns = pov_score.score()
+    if centipawns is None:
+        return ""
+
+    return f"{centipawns / 100:+.1f}"
 
 
 def stream_game_lines(game_id, headers, is_bot_account, attempts=12, delay_seconds=1.5):
@@ -214,15 +232,18 @@ def stream_game(game_id, token, username, engine_path, is_bot_account):
                         )
 
                         best = prefix + board.san(info[0]["pv"][0])
+                        best_eval = format_eval(info[0].get("score"), user_color)
                         alt = "N/A"
+                        alt_eval = ""
                         if len(info) > 1 and info[1].get("pv"):
                             alt = prefix + board.san(info[1]["pv"][0])
+                            alt_eval = format_eval(info[1].get("score"), user_color)
 
                         print(f"\n[!] YOUR TURN (Game: {game_id})")
                         print(f"Opponent:    {opponent}")
                         print(f"Current move:{current_move}")
-                        print(f"STOCKFISH:   {best}")
-                        print(f"ALTERNATIVE: {alt}")
+                        print(f"STOCKFISH:   {best:<12} {best_eval}".rstrip())
+                        print(f"ALTERNATIVE: {alt:<12} {alt_eval}".rstrip())
                         print(f"Link: https://lichess.org/{game_id}")
 
                     else:
