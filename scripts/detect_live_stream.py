@@ -29,8 +29,12 @@ def get_account_info(token):
         if isinstance(data, dict):
             return data
     except Exception as exc:
-        print(f"[!] DEBUG: Could not fetch account info: {exc}")
+        print(f"[!] Could not fetch account info from token: {exc}")
     return {}
+
+
+def get_account_username(token):
+    return get_account_info(token).get("username")
 
 
 def get_active_game_ids(token):
@@ -44,7 +48,7 @@ def get_active_game_ids(token):
             if game_id:
                 game_ids.append(game_id)
     except Exception as exc:
-        print(f"[!] DEBUG: Could not fetch active games: {exc}")
+        print(f"[!] Could not fetch active games: {exc}")
     return game_ids
 
 
@@ -55,165 +59,269 @@ def get_token_scopes(token):
             return []
         response.raise_for_status()
         data = response.json()
-        return data.get("scopes", [])
+        scopes = data.get("scopes")
+        if isinstance(scopes, list):
+            return sorted(scope for scope in scopes if isinstance(scope, str))
     except Exception as exc:
-        print(f"[!] DEBUG: Could not fetch token scopes: {exc}")
+        print(f"[!] Could not fetch token scopes: {exc}")
     return []
 
 
 def stream_events(token):
     headers = auth_headers(token)
-    print("[*] DEBUG: Starting event stream...")
     with requests.get(EVENT_STREAM, headers=headers, stream=True) as r:
         for line in r.iter_lines():
             if not line:
                 continue
             try:
                 data = json.loads(line)
-                yield data
-            except Exception as exc:
-                print(f"[!] DEBUG: Event stream JSON error: {exc}")
+                if isinstance(data, dict):
+                    yield data
+            except Exception:
                 continue
 
 
+def player_name(player):
+    if not isinstance(player, dict):
+        return "Unknown"
+    return player.get("name") or player.get("id") or "Unknown"
+
+
 def format_eval(score, pov_color):
-    if score is None: return ""
+    if score is None:
+        return ""
+
     pov_score = score.pov(pov_color)
     mate_score = pov_score.mate()
-    if mate_score is not None: return f"M{mate_score:+d}"
+    if mate_score is not None:
+        return f"M{mate_score:+d}"
+
     centipawns = pov_score.score()
-    return f"{centipawns / 100:+.1f}" if centipawns is not None else ""
+    if centipawns is None:
+        return ""
+
+    return f"{centipawns / 100:+.1f}"
 
 
-def stream_game_lines(game_id, headers, is_bot_account, attempts=12, delay_seconds=1.0):
-    endpoints = [
-        ("board", BOARD_GAME_STREAM.format(game_id)),
-        ("bot", BOT_GAME_STREAM.format(game_id)),
-    ]
+def stream_game_lines(game_id, headers, is_bot_account, attempts=12, delay_seconds=1.5):
+    # Prefer the account-appropriate stream, but also try the other endpoint.
+    # Some game types are only available on one of these APIs.
     if is_bot_account:
-        endpoints.reverse()
+        endpoints = [
+            ("bot", BOT_GAME_STREAM.format(game_id)),
+            ("board", BOARD_GAME_STREAM.format(game_id)),
+        ]
+    else:
+        endpoints = [
+            ("board", BOARD_GAME_STREAM.format(game_id)),
+            ("bot", BOT_GAME_STREAM.format(game_id)),
+        ]
 
     last_failures = []
     for attempt in range(1, attempts + 1):
-        for name, endpoint in endpoints:
+        last_failures = []
+        for endpoint_name, endpoint in endpoints:
             try:
-                print(f"[*] DEBUG: Attempting {name} stream (Attempt {attempt})...")
                 response = requests.get(endpoint, headers=headers, stream=True, timeout=60)
                 if response.status_code == 200:
                     return response.iter_lines(), response, None
-                last_failures.append(f"{name}:{response.status_code}")
+
+                status = response.status_code
+                body = response.text.strip().replace("\n", " ")
+                if len(body) > 160:
+                    body = body[:157] + "..."
+                last_failures.append(f"{endpoint_name}:{status} ({body or 'no body'})")
                 response.close()
             except Exception as exc:
-                last_failures.append(f"{name}:err({exc})")
-        time.sleep(delay_seconds)
+                last_failures.append(f"{endpoint_name}:error ({exc})")
+                continue
+
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+
     return None, None, "; ".join(last_failures)
 
 
 def stream_game(game_id, token, username, engine_path, is_bot_account):
     headers = auth_headers(token)
     board = chess.Board()
-    white, black = None, None
-    game_speed = "rapid"  # Default
+    white = None
+    black = None
     last_position_key = None
 
     try:
         line_iter, response, failure_reason = stream_game_lines(game_id, headers, is_bot_account)
         if not line_iter:
-            print(f"[!] DEBUG: Game {game_id} stream failed. Reason: {failure_reason}")
+            print(f"[!] Could not open game stream for {game_id}.")
+            if failure_reason:
+                print(f"    Last API replies: {failure_reason}")
+
+                failure_lower = failure_reason.lower()
+                if "401" in failure_reason or "403" in failure_reason:
+                    print("    Token is likely missing required scopes (board:play and/or bot:play).")
+                elif "cannot be played with the board api" in failure_lower:
+                    print("    This game is not streamable through Board API for this token/account.")
+                elif "cannot be played with the bot api" in failure_lower:
+                    print("    This game is not streamable through Bot API for this token/account.")
+                else:
+                    print("    Could not determine a valid stream endpoint for this game.")
             return
 
         with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
-            print(f"[*] DEBUG: Engine loaded for game {game_id}")
             with response:
                 for line in line_iter:
-                    if not line: continue
+                    if not line:
+                        continue
+
                     try:
                         event = json.loads(line)
-                    except: continue
+                    except Exception:
+                        continue
+
+                    if not isinstance(event, dict):
+                        continue
 
                     event_type = event.get("type")
+                    if not event_type:
+                        continue
+
                     if event_type == "gameFull":
-                        game_speed = event.get("speed", "rapid")
-                        print(f"[*] DEBUG: Game Speed Detected: {game_speed}")
-                        
                         board.reset()
                         moves = event.get("state", {}).get("moves", "")
-                        for move in moves.split(): board.push_uci(move)
-                        
-                        white = event.get("white", {}).get("name") or event.get("white", {}).get("id")
-                        black = event.get("black", {}).get("name") or event.get("black", {}).get("id")
+                        if moves:
+                            for move in moves.split():
+                                board.push_uci(move)
+
+                        white = player_name(event.get("white"))
+                        black = player_name(event.get("black"))
 
                     elif event_type == "gameState":
                         board.reset()
                         moves = event.get("moves", "")
-                        for move in moves.split(): board.push_uci(move)
+                        if moves:
+                            for move in moves.split():
+                                board.push_uci(move)
+
                     else:
                         continue
 
-                    # Avoid duplicate processing
-                    pos_key = (len(board.move_stack), board.turn)
-                    if pos_key == last_position_key: continue
-                    last_position_key = pos_key
+                    if not white or not black:
+                        continue
 
-                    is_white = str(white).lower() == username.lower()
+                    # Avoid duplicate prints for identical positions.
+                    position_key = (len(board.move_stack), board.turn)
+                    if position_key == last_position_key:
+                        continue
+                    last_position_key = position_key
+
+                    is_white = white.lower() == username.lower()
                     user_color = chess.WHITE if is_white else chess.BLACK
                     opponent = black if is_white else white
 
-                    if board.turn == user_color and not board.is_game_over():
-                        # DYNAMIC TIMING: Blitz/Bullet = 0.3s, others = 0.8s
-                        analysis_time = 0.3 if game_speed in ["blitz", "bullet", "ultraBullet"] else 0.8
-                        
-                        print(f"[*] DEBUG: Analysing for {analysis_time}s (Speed: {game_speed})...")
-                        info = engine.analyse(board, chess.engine.Limit(time=analysis_time), multipv=2)
+                    current_move = board.fullmove_number
 
-                        if info and "pv" in info[0]:
-                            prefix = f"{board.fullmove_number}. " if board.turn == chess.WHITE else f"{board.fullmove_number}... "
-                            best = prefix + board.san(info[0]["pv"][0])
-                            score = format_eval(info[0].get("score"), user_color)
-                            
-                            alt_str = "N/A"
-                            if len(info) > 1 and info[1].get("pv"):
-                                alt_str = prefix + board.san(info[1]["pv"][0]) + " " + format_eval(info[1].get("score"), user_color)
+                    if board.turn == user_color:
+                        if board.is_game_over():
+                            print(f"\n[!] Game over vs {opponent} (Game: {game_id})")
+                            continue
 
-                            print(f"\n[!] YOUR TURN vs {opponent} ({game_id})")
-                            print(f"STOCKFISH:    {best:<12} {score}")
-                            print(f"ALTERNATIVE:  {alt_str}")
+                        info = engine.analyse(
+                            board,
+                            chess.engine.Limit(time=0.8),
+                            multipv=2
+                        )
+
+                        if not info or "pv" not in info[0] or not info[0]["pv"]:
+                            print(f"\n[!] Your turn vs {opponent} (Game: {game_id})")
+                            print(f"Current move: {current_move}")
+                            print("No engine move available for this position.")
                             print(f"Link: https://lichess.org/{game_id}")
+                            continue
+
+                        prefix = (
+                            f"{current_move}. "
+                            if board.turn == chess.WHITE
+                            else f"{current_move}... "
+                        )
+
+                        best = prefix + board.san(info[0]["pv"][0])
+                        best_eval = format_eval(info[0].get("score"), user_color)
+                        alt = "N/A"
+                        alt_eval = ""
+                        if len(info) > 1 and info[1].get("pv"):
+                            alt = prefix + board.san(info[1]["pv"][0])
+                            alt_eval = format_eval(info[1].get("score"), user_color)
+
+                        print(f"\n[!] YOUR TURN (Game: {game_id})")
+                        print(f"Opponent:    {opponent}")
+                        print(f"Current move:{current_move}")
+                        print(f"STOCKFISH:   {best:<12} {best_eval}".rstrip())
+                        print(f"ALTERNATIVE: {alt:<12} {alt_eval}".rstrip())
+                        print(f"Link: https://lichess.org/{game_id}")
+
                     else:
-                        print(f"[*] DEBUG: Waiting for {opponent} to move...")
+                        print(f"[*] Waiting for opponent to move (Game: {game_id})")
+                        print(f"Opponent:    {opponent}")
 
     except Exception as exc:
-        print(f"[!] DEBUG: Fatal error in game {game_id}: {exc}")
+        print(f"[!] Stream error in game {game_id}: {exc}")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--username")
+    parser.add_argument("--username", help="Lichess username (auto-detected from token if omitted)")
     parser.add_argument("--stockfish-path", default="stockfish")
     args = parser.parse_args()
 
     token = os.getenv("LICHESS_TOKEN")
     if not token:
-        print("[!] Error: Set LICHESS_TOKEN env variable.")
+        print("Missing LICHESS_TOKEN environment variable.")
         return
 
     account = get_account_info(token)
     username = args.username or account.get("username")
-    is_bot = account.get("title") == "BOT"
+    if not username:
+        print("Missing username. Provide --username or use a token with account scope.")
+        return
 
-    print(f"--- MONITORING: {username} ---")
-    
-    # Catch already running games
-    for g_id in get_active_game_ids(token):
-        print(f"[+] DEBUG: Found active game {g_id}")
-        threading.Thread(target=stream_game, args=(g_id, token, username, args.stockfish_path, is_bot), daemon=True).start()
+    is_bot_account = account.get("title") == "BOT"
+    account_kind = "BOT" if is_bot_account else "HUMAN"
 
-    # Listen for new games
+    print(f"--- REAL-TIME STREAM MONITORING: {username} ({account_kind}) ---")
+
+    scopes = get_token_scopes(token)
+    if scopes:
+        print(f"[*] Token scopes: {', '.join(scopes)}")
+        if is_bot_account and "bot:play" not in scopes:
+            print("[!] Warning: bot account detected, but bot:play scope is missing.")
+        if not is_bot_account and "board:play" not in scopes:
+            print("[!] Warning: human account detected, but board:play scope is missing.")
+
+    started_games = set()
+
+    # Detect already-live games when the script starts.
+    for game_id in get_active_game_ids(token):
+        started_games.add(game_id)
+        print(f"\n[+] Live Game Detected: {game_id}")
+        threading.Thread(
+            target=stream_game,
+            args=(game_id, token, username, args.stockfish_path, is_bot_account),
+            daemon=True
+        ).start()
+
     for event in stream_events(token):
         if event.get("type") == "gameStart":
-            g_id = event["game"]["id"]
-            print(f"[+] DEBUG: New game starting: {g_id}")
-            threading.Thread(target=stream_game, args=(g_id, token, username, args.stockfish_path, is_bot), daemon=True).start()
+            game_id = event["game"]["id"]
+            if game_id in started_games:
+                continue
+            started_games.add(game_id)
+            print(f"\n[+] Game Started: {game_id}")
+
+            threading.Thread(
+                target=stream_game,
+                args=(game_id, token, username, args.stockfish_path, is_bot_account),
+                daemon=True
+            ).start()
 
 
 if __name__ == "__main__":
