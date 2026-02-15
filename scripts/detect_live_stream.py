@@ -15,6 +15,7 @@ BOARD_GAME_STREAM = "https://lichess.org/api/board/game/stream/{}"
 ACCOUNT_INFO = "https://lichess.org/api/account"
 ACTIVE_GAMES = "https://lichess.org/api/account/playing"
 TOKEN_TEST = "https://lichess.org/api/token/test"
+GAME_EXPORT = "https://lichess.org/game/export/{}"
 
 
 def auth_headers(token):
@@ -142,6 +143,123 @@ def stream_game_lines(game_id, headers, is_bot_account, attempts=12, delay_secon
     return None, None, "; ".join(last_failures)
 
 
+def fetch_game_export(game_id, headers):
+    response = requests.get(
+        GAME_EXPORT.format(game_id),
+        headers={**headers, "Accept": "application/json"},
+        params={"moves": "true", "pgnInJson": "true", "clocks": "true"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError("Unexpected export payload")
+    return data
+
+
+def extract_names_from_export(payload):
+    players = payload.get("players", {}) if isinstance(payload, dict) else {}
+
+    def from_color(color):
+        side = players.get(color, {}) if isinstance(players, dict) else {}
+        user = side.get("user", {}) if isinstance(side, dict) else {}
+        return user.get("name") or side.get("name") or "Unknown"
+
+    return from_color("white"), from_color("black")
+
+
+def analyse_and_print_position(engine, board, username, white, black, game_id):
+    if not white or not black:
+        return
+
+    is_white = white.lower() == username.lower()
+    user_color = chess.WHITE if is_white else chess.BLACK
+    opponent = black if is_white else white
+    current_move = board.fullmove_number
+
+    if board.turn == user_color:
+        if board.is_game_over():
+            print(f"\n[!] Game over vs {opponent} (Game: {game_id})")
+            return
+
+        info = engine.analyse(
+            board,
+            chess.engine.Limit(time=0.8),
+            multipv=2
+        )
+
+        if not info or "pv" not in info[0] or not info[0]["pv"]:
+            print(f"\n[!] Your turn vs {opponent} (Game: {game_id})")
+            print(f"Current move: {current_move}")
+            print("No engine move available for this position.")
+            print(f"Link: https://lichess.org/{game_id}")
+            return
+
+        prefix = (
+            f"{current_move}. "
+            if board.turn == chess.WHITE
+            else f"{current_move}... "
+        )
+
+        best = prefix + board.san(info[0]["pv"][0])
+        best_eval = format_eval(info[0].get("score"), user_color)
+        alt = "N/A"
+        alt_eval = ""
+        if len(info) > 1 and info[1].get("pv"):
+            alt = prefix + board.san(info[1]["pv"][0])
+            alt_eval = format_eval(info[1].get("score"), user_color)
+
+        print(f"\n[!] YOUR TURN (Game: {game_id})")
+        print(f"Opponent:    {opponent}")
+        print(f"Current move:{current_move}")
+        print(f"STOCKFISH:   {best:<12} {best_eval}".rstrip())
+        print(f"ALTERNATIVE: {alt:<12} {alt_eval}".rstrip())
+        print(f"Link: https://lichess.org/{game_id}")
+
+    else:
+        print(f"[*] Waiting for opponent to move (Game: {game_id})")
+        print(f"Opponent:    {opponent}")
+
+
+def fallback_poll_game(game_id, token, username, engine_path, interval_seconds=1.0):
+    headers = auth_headers(token)
+    board = chess.Board()
+    last_position_key = None
+    white = None
+    black = None
+
+    print(f"[*] Falling back to export polling for game {game_id}.")
+
+    with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
+        while True:
+            try:
+                payload = fetch_game_export(game_id, headers)
+            except Exception as exc:
+                print(f"[!] Polling error for {game_id}: {exc}")
+                time.sleep(interval_seconds)
+                continue
+
+            white, black = extract_names_from_export(payload)
+
+            moves = payload.get("moves", "")
+            board.reset()
+            if moves:
+                for move in moves.split():
+                    board.push_uci(move)
+
+            position_key = (len(board.move_stack), board.turn)
+            if position_key != last_position_key:
+                last_position_key = position_key
+                analyse_and_print_position(engine, board, username, white, black, game_id)
+
+            status = payload.get("status")
+            if isinstance(status, str) and status.lower() not in {"started", "created"}:
+                print(f"[!] Polling ended, game status: {status} (Game: {game_id})")
+                break
+
+            time.sleep(interval_seconds)
+
+
 def stream_game(game_id, token, username, engine_path, is_bot_account):
     headers = auth_headers(token)
     board = chess.Board()
@@ -214,57 +332,13 @@ def stream_game(game_id, token, username, engine_path, is_bot_account):
                         continue
                     last_position_key = position_key
 
-                    is_white = white.lower() == username.lower()
-                    user_color = chess.WHITE if is_white else chess.BLACK
-                    opponent = black if is_white else white
-
-                    current_move = board.fullmove_number
-
-                    if board.turn == user_color:
-                        if board.is_game_over():
-                            print(f"\n[!] Game over vs {opponent} (Game: {game_id})")
-                            continue
-
-                        info = engine.analyse(
-                            board,
-                            chess.engine.Limit(time=0.8),
-                            multipv=2
-                        )
-
-                        if not info or "pv" not in info[0] or not info[0]["pv"]:
-                            print(f"\n[!] Your turn vs {opponent} (Game: {game_id})")
-                            print(f"Current move: {current_move}")
-                            print("No engine move available for this position.")
-                            print(f"Link: https://lichess.org/{game_id}")
-                            continue
-
-                        prefix = (
-                            f"{current_move}. "
-                            if board.turn == chess.WHITE
-                            else f"{current_move}... "
-                        )
-
-                        best = prefix + board.san(info[0]["pv"][0])
-                        best_eval = format_eval(info[0].get("score"), user_color)
-                        alt = "N/A"
-                        alt_eval = ""
-                        if len(info) > 1 and info[1].get("pv"):
-                            alt = prefix + board.san(info[1]["pv"][0])
-                            alt_eval = format_eval(info[1].get("score"), user_color)
-
-                        print(f"\n[!] YOUR TURN (Game: {game_id})")
-                        print(f"Opponent:    {opponent}")
-                        print(f"Current move:{current_move}")
-                        print(f"STOCKFISH:   {best:<12} {best_eval}".rstrip())
-                        print(f"ALTERNATIVE: {alt:<12} {alt_eval}".rstrip())
-                        print(f"Link: https://lichess.org/{game_id}")
-
-                    else:
-                        print(f"[*] Waiting for opponent to move (Game: {game_id})")
-                        print(f"Opponent:    {opponent}")
+                    analyse_and_print_position(engine, board, username, white, black, game_id)
 
     except Exception as exc:
         print(f"[!] Stream error in game {game_id}: {exc}")
+
+    if not is_bot_account:
+        fallback_poll_game(game_id, token, username, engine_path)
 
 
 def main():
