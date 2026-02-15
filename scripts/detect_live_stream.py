@@ -9,8 +9,7 @@ import chess
 import chess.engine
 
 EVENT_STREAM = "https://lichess.org/api/stream/event"
-BOT_GAME_STREAM = "https://lichess.org/api/bot/game/stream/{}"
-BOARD_GAME_STREAM = "https://lichess.org/api/board/game/stream/{}"
+GAME_STREAM = "https://lichess.org/api/bot/game/stream/{}"
 ACCOUNT_INFO = "https://lichess.org/api/account"
 ACTIVE_GAMES = "https://lichess.org/api/account/playing"
 
@@ -48,8 +47,7 @@ def get_active_game_ids(token):
 
 def stream_events(token):
     headers = auth_headers(token)
-    with requests.get(EVENT_STREAM, headers=headers, stream=True, timeout=60) as r:
-        r.raise_for_status()
+    with requests.get(EVENT_STREAM, headers=headers, stream=True) as r:
         for line in r.iter_lines():
             if not line:
                 continue
@@ -143,6 +141,7 @@ def stream_game(game_id, token, username, engine_path):
                     is_white = white.lower() == username.lower()
                     user_color = chess.WHITE if is_white else chess.BLACK
                     opponent = black if is_white else white
+
                     current_move = board.fullmove_number
 
                     if board.turn == user_color:
@@ -157,8 +156,7 @@ def stream_game(game_id, token, username, engine_path):
                         )
 
                         if not info or "pv" not in info[0] or not info[0]["pv"]:
-                            print(f"\n[!] YOUR TURN (Game: {game_id})")
-                            print(f"Opponent:     {opponent}")
+                            print(f"\n[!] Your turn vs {opponent} (Game: {game_id})")
                             print(f"Current move: {current_move}")
                             print("No engine move available for this position.")
                             print(f"Link: https://lichess.org/{game_id}")
@@ -176,15 +174,15 @@ def stream_game(game_id, token, username, engine_path):
                             alt = prefix + board.san(info[1]["pv"][0])
 
                         print(f"\n[!] YOUR TURN (Game: {game_id})")
-                        print(f"Opponent:     {opponent}")
-                        print(f"Current move: {current_move}")
-                        print(f"STOCKFISH:    {best}")
-                        print(f"ALTERNATIVE:  {alt}")
+                        print(f"Opponent:    {opponent}")
+                        print(f"Current move:{current_move}")
+                        print(f"STOCKFISH:   {best}")
+                        print(f"ALTERNATIVE: {alt}")
                         print(f"Link: https://lichess.org/{game_id}")
 
                     else:
-                        print(f"\n[*] Waiting for opponent to move (Game: {game_id})")
-                        print(f"Opponent:     {opponent}")
+                        print(f"[*] Waiting for opponent to move (Game: {game_id})")
+                        print(f"Opponent:    {opponent}")
 
     except Exception as exc:
         print(f"[!] Stream error in game {game_id}: {exc}")
