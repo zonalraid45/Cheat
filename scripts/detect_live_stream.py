@@ -3,6 +3,7 @@
 import argparse
 import os
 import json
+import time
 import threading
 import requests
 import chess
@@ -66,17 +67,28 @@ def player_name(player):
     return player.get("name") or player.get("id") or "Unknown"
 
 
-def stream_game_lines(game_id, headers):
+def stream_game_lines(game_id, headers, attempts=30, delay_seconds=2.0):
     endpoints = [BOT_GAME_STREAM.format(game_id), BOARD_GAME_STREAM.format(game_id)]
-    for endpoint in endpoints:
-        try:
-            response = requests.get(endpoint, headers=headers, stream=True, timeout=60)
-            if response.status_code == 200:
-                return response.iter_lines(), response
-            response.close()
-        except Exception:
-            continue
-    return None, None
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        for endpoint in endpoints:
+            try:
+                response = requests.get(endpoint, headers=headers, stream=True, timeout=60)
+                if response.status_code == 200:
+                    return response.iter_lines(), response, None
+
+                # Keep a compact diagnostic so failures are actionable.
+                body = response.text[:200].replace("\n", " ") if response.text else ""
+                last_error = f"HTTP {response.status_code} from {endpoint}: {body}".strip()
+                response.close()
+            except Exception as exc:
+                last_error = f"{endpoint}: {exc}"
+
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+
+    return None, None, last_error
 
 
 def stream_game(game_id, token, username, engine_path):
@@ -88,9 +100,9 @@ def stream_game(game_id, token, username, engine_path):
 
     try:
         with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
-            line_iter, response = stream_game_lines(game_id, headers)
+            line_iter, response, open_error = stream_game_lines(game_id, headers)
             if not line_iter:
-                print(f"[!] Could not open game stream for {game_id}. Token may need board/bot scope.")
+                print(f"[!] Could not open game stream for {game_id}. Last error: {open_error}")
                 return
 
             with response:
@@ -221,7 +233,12 @@ def main():
 
     for event in stream_events(token):
         if event.get("type") == "gameStart":
-            game_id = event["game"]["id"]
+            game = event.get("game", {})
+            game_id = game.get("id") or game.get("gameId") or ""
+            if not game_id and game.get("fullId"):
+                game_id = str(game["fullId"])[:8]
+            if not game_id:
+                continue
             if game_id in started_games:
                 continue
             started_games.add(game_id)
