@@ -14,22 +14,27 @@ BOT_GAME_STREAM = "https://lichess.org/api/bot/game/stream/{}"
 BOARD_GAME_STREAM = "https://lichess.org/api/board/game/stream/{}"
 ACCOUNT_INFO = "https://lichess.org/api/account"
 ACTIVE_GAMES = "https://lichess.org/api/account/playing"
+TOKEN_TEST = "https://lichess.org/api/token/test"
 
 
 def auth_headers(token):
     return {"Authorization": f"Bearer {token}"}
 
 
-def get_account_username(token):
+def get_account_info(token):
     try:
         response = requests.get(ACCOUNT_INFO, headers=auth_headers(token), timeout=15)
         response.raise_for_status()
         data = response.json()
         if isinstance(data, dict):
-            return data.get("username")
+            return data
     except Exception as exc:
-        print(f"[!] Could not fetch username from token: {exc}")
-    return None
+        print(f"[!] Could not fetch account info from token: {exc}")
+    return {}
+
+
+def get_account_username(token):
+    return get_account_info(token).get("username")
 
 
 def get_active_game_ids(token):
@@ -45,6 +50,19 @@ def get_active_game_ids(token):
     except Exception as exc:
         print(f"[!] Could not fetch active games: {exc}")
     return game_ids
+
+
+def get_token_scopes(token):
+    try:
+        response = requests.get(TOKEN_TEST, headers=auth_headers(token), timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        scopes = data.get("scopes")
+        if isinstance(scopes, list):
+            return sorted(scope for scope in scopes if isinstance(scope, str))
+    except Exception as exc:
+        print(f"[!] Could not fetch token scopes: {exc}")
+    return []
 
 
 def stream_events(token):
@@ -67,25 +85,39 @@ def player_name(player):
     return player.get("name") or player.get("id") or "Unknown"
 
 
-def stream_game_lines(game_id, headers, attempts=8, delay_seconds=1.5):
-    endpoints = [BOT_GAME_STREAM.format(game_id), BOARD_GAME_STREAM.format(game_id)]
+def stream_game_lines(game_id, headers, is_bot_account, attempts=12, delay_seconds=1.5):
+    # Human accounts must use board stream. Bot accounts must use bot stream.
+    if is_bot_account:
+        endpoints = [("bot", BOT_GAME_STREAM.format(game_id))]
+    else:
+        endpoints = [("board", BOARD_GAME_STREAM.format(game_id))]
+
+    last_failures = []
     for attempt in range(1, attempts + 1):
-        for endpoint in endpoints:
+        last_failures = []
+        for endpoint_name, endpoint in endpoints:
             try:
                 response = requests.get(endpoint, headers=headers, stream=True, timeout=60)
                 if response.status_code == 200:
-                    return response.iter_lines(), response
+                    return response.iter_lines(), response, None
+
+                status = response.status_code
+                body = response.text.strip().replace("\n", " ")
+                if len(body) > 160:
+                    body = body[:157] + "..."
+                last_failures.append(f"{endpoint_name}:{status} ({body or 'no body'})")
                 response.close()
-            except Exception:
+            except Exception as exc:
+                last_failures.append(f"{endpoint_name}:error ({exc})")
                 continue
 
         if attempt < attempts:
             time.sleep(delay_seconds)
 
-    return None, None
+    return None, None, "; ".join(last_failures)
 
 
-def stream_game(game_id, token, username, engine_path):
+def stream_game(game_id, token, username, engine_path, is_bot_account):
     headers = auth_headers(token)
     board = chess.Board()
     white = None
@@ -93,12 +125,18 @@ def stream_game(game_id, token, username, engine_path):
     last_position_key = None
 
     try:
-        with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
-            line_iter, response = stream_game_lines(game_id, headers)
-            if not line_iter:
-                print(f"[!] Could not open game stream for {game_id}. Token may need board/bot scope.")
-                return
+        line_iter, response, failure_reason = stream_game_lines(game_id, headers, is_bot_account)
+        if not line_iter:
+            print(f"[!] Could not open game stream for {game_id}.")
+            if failure_reason:
+                print(f"    Last API replies: {failure_reason}")
+            if is_bot_account:
+                print("    This bot token needs bot:play scope.")
+            else:
+                print("    This human token needs board:play scope.")
+            return
 
+        with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
             with response:
                 for line in line_iter:
                     if not line:
@@ -206,12 +244,24 @@ def main():
         print("Missing LICHESS_TOKEN environment variable.")
         return
 
-    username = args.username or get_account_username(token)
+    account = get_account_info(token)
+    username = args.username or account.get("username")
     if not username:
         print("Missing username. Provide --username or use a token with account scope.")
         return
 
-    print(f"--- REAL-TIME STREAM MONITORING: {username} ---")
+    is_bot_account = account.get("title") == "BOT"
+    account_kind = "BOT" if is_bot_account else "HUMAN"
+
+    print(f"--- REAL-TIME STREAM MONITORING: {username} ({account_kind}) ---")
+
+    scopes = get_token_scopes(token)
+    if scopes:
+        print(f"[*] Token scopes: {', '.join(scopes)}")
+        if is_bot_account and "bot:play" not in scopes:
+            print("[!] Warning: bot account detected, but bot:play scope is missing.")
+        if not is_bot_account and "board:play" not in scopes:
+            print("[!] Warning: human account detected, but board:play scope is missing.")
 
     started_games = set()
 
@@ -221,7 +271,7 @@ def main():
         print(f"\n[+] Live Game Detected: {game_id}")
         threading.Thread(
             target=stream_game,
-            args=(game_id, token, username, args.stockfish_path),
+            args=(game_id, token, username, args.stockfish_path, is_bot_account),
             daemon=True
         ).start()
 
@@ -235,7 +285,7 @@ def main():
 
             threading.Thread(
                 target=stream_game,
-                args=(game_id, token, username, args.stockfish_path),
+                args=(game_id, token, username, args.stockfish_path, is_bot_account),
                 daemon=True
             ).start()
 
