@@ -104,11 +104,18 @@ def format_eval(score, pov_color):
 
 
 def stream_game_lines(game_id, headers, is_bot_account, attempts=12, delay_seconds=1.5):
-    # Human accounts must use board stream. Bot accounts must use bot stream.
+    # Prefer the account-appropriate stream, but also try the other endpoint.
+    # Some game types are only available on one of these APIs.
     if is_bot_account:
-        endpoints = [("bot", BOT_GAME_STREAM.format(game_id))]
+        endpoints = [
+            ("bot", BOT_GAME_STREAM.format(game_id)),
+            ("board", BOARD_GAME_STREAM.format(game_id)),
+        ]
     else:
-        endpoints = [("board", BOARD_GAME_STREAM.format(game_id))]
+        endpoints = [
+            ("board", BOARD_GAME_STREAM.format(game_id)),
+            ("bot", BOT_GAME_STREAM.format(game_id)),
+        ]
 
     last_failures = []
     for attempt in range(1, attempts + 1):
@@ -148,10 +155,16 @@ def stream_game(game_id, token, username, engine_path, is_bot_account):
             print(f"[!] Could not open game stream for {game_id}.")
             if failure_reason:
                 print(f"    Last API replies: {failure_reason}")
-            if is_bot_account:
-                print("    This bot token needs bot:play scope.")
-            else:
-                print("    This human token needs board:play scope.")
+
+                failure_lower = failure_reason.lower()
+                if "401" in failure_reason or "403" in failure_reason:
+                    print("    Token is likely missing required scopes (board:play and/or bot:play).")
+                elif "cannot be played with the board api" in failure_lower:
+                    print("    This game is not streamable through Board API for this token/account.")
+                elif "cannot be played with the bot api" in failure_lower:
+                    print("    This game is not streamable through Bot API for this token/account.")
+                else:
+                    print("    Could not determine a valid stream endpoint for this game.")
             return
 
         with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
