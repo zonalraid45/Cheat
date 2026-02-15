@@ -55,8 +55,27 @@ def stream_events(token):
                 data = json.loads(line)
                 if isinstance(data, dict):
                     yield data
-            except:
+            except Exception:
                 continue
+
+
+def player_name(player):
+    if not isinstance(player, dict):
+        return "Unknown"
+    return player.get("name") or player.get("id") or "Unknown"
+
+
+def stream_game_lines(game_id, headers):
+    endpoints = [BOT_GAME_STREAM.format(game_id), BOARD_GAME_STREAM.format(game_id)]
+    for endpoint in endpoints:
+        try:
+            response = requests.get(endpoint, headers=headers, stream=True, timeout=60)
+            if response.status_code == 200:
+                return response.iter_lines(), response
+            response.close()
+        except Exception:
+            continue
+    return None, None
 
 
 def stream_game(game_id, token, username, engine_path):
@@ -64,19 +83,23 @@ def stream_game(game_id, token, username, engine_path):
     board = chess.Board()
     white = None
     black = None
-    last_move_count = -1
+    last_position_key = None
 
     try:
         with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
-            with requests.get(GAME_STREAM.format(game_id), headers=headers, stream=True) as r:
+            line_iter, response = stream_game_lines(game_id, headers)
+            if not line_iter:
+                print(f"[!] Could not open game stream for {game_id}. Token may need board/bot scope.")
+                return
 
-                for line in r.iter_lines():
+            with response:
+                for line in line_iter:
                     if not line:
                         continue
 
                     try:
                         event = json.loads(line)
-                    except:
+                    except Exception:
                         continue
 
                     if not isinstance(event, dict):
@@ -88,13 +111,13 @@ def stream_game(game_id, token, username, engine_path):
 
                     if event_type == "gameFull":
                         board.reset()
-                        moves = event["state"].get("moves", "")
+                        moves = event.get("state", {}).get("moves", "")
                         if moves:
                             for move in moves.split():
                                 board.push_uci(move)
 
-                        white = event["white"]["name"]
-                        black = event["black"]["name"]
+                        white = player_name(event.get("white"))
+                        black = player_name(event.get("black"))
 
                     elif event_type == "gameState":
                         board.reset()
@@ -109,12 +132,11 @@ def stream_game(game_id, token, username, engine_path):
                     if not white or not black:
                         continue
 
-                    move_count = len(board.move_stack)
-
-                    # Avoid duplicate processing
-                    if move_count == last_move_count:
+                    # Avoid duplicate prints for identical positions.
+                    position_key = (len(board.move_stack), board.turn)
+                    if position_key == last_position_key:
                         continue
-                    last_move_count = move_count
+                    last_position_key = position_key
 
                     is_white = white.lower() == username.lower()
                     user_color = chess.WHITE if is_white else chess.BLACK
@@ -148,7 +170,7 @@ def stream_game(game_id, token, username, engine_path):
 
                         best = prefix + board.san(info[0]["pv"][0])
                         alt = "N/A"
-                        if len(info) > 1:
+                        if len(info) > 1 and info[1].get("pv"):
                             alt = prefix + board.san(info[1]["pv"][0])
 
                         print(f"\n[!] YOUR TURN (Game: {game_id})")
@@ -162,8 +184,8 @@ def stream_game(game_id, token, username, engine_path):
                         print(f"[*] Waiting for opponent to move (Game: {game_id})")
                         print(f"Opponent:    {opponent}")
 
-    except Exception as e:
-        print(f"[!] Stream error in game {game_id}: {e}")
+    except Exception as exc:
+        print(f"[!] Stream error in game {game_id}: {exc}")
 
 
 def main():
