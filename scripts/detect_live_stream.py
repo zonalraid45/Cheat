@@ -94,9 +94,9 @@ def stream_game(game_id, token, username, engine_path):
 
     try:
         with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
-            line_iter, response, open_error = stream_game_lines(game_id, headers)
+            line_iter, response = stream_game_lines(game_id, headers)
             if not line_iter:
-                print(f"[!] Could not open game stream for {game_id}. Last error: {open_error}")
+                print(f"[!] Could not open game stream for {game_id}. Token may need board/bot scope.")
                 return
 
             with response:
@@ -227,12 +227,7 @@ def main():
 
     for event in stream_events(token):
         if event.get("type") == "gameStart":
-            game = event.get("game", {})
-            game_id = game.get("id") or game.get("gameId") or ""
-            if not game_id and game.get("fullId"):
-                game_id = str(game["fullId"])[:8]
-            if not game_id:
-                continue
+            game_id = event["game"]["id"]
             if game_id in started_games:
                 continue
             started_games.add(game_id)
