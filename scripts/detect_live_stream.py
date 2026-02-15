@@ -185,7 +185,7 @@ def analyse_and_print_position(engine, board, username, white, black, game_id):
         info = engine.analyse(
             board,
             chess.engine.Limit(time=0.8),
-            multipv=2
+            multipv=3
         )
 
         if not info or "pv" not in info[0] or not info[0]["pv"]:
@@ -205,15 +205,21 @@ def analyse_and_print_position(engine, board, username, white, black, game_id):
         best_eval = format_eval(info[0].get("score"), user_color)
         alt = "N/A"
         alt_eval = ""
+        alt_two = "N/A"
+        alt_two_eval = ""
         if len(info) > 1 and info[1].get("pv"):
             alt = prefix + board.san(info[1]["pv"][0])
             alt_eval = format_eval(info[1].get("score"), user_color)
+        if len(info) > 2 and info[2].get("pv"):
+            alt_two = prefix + board.san(info[2]["pv"][0])
+            alt_two_eval = format_eval(info[2].get("score"), user_color)
 
         print(f"\n[!] YOUR TURN (Game: {game_id})")
         print(f"Opponent:    {opponent}")
         print(f"Current move:{current_move}")
         print(f"STOCKFISH:   {best:<12} {best_eval}".rstrip())
         print(f"ALTERNATIVE: {alt:<12} {alt_eval}".rstrip())
+        print(f"ALT #2:      {alt_two:<12} {alt_two_eval}".rstrip())
         print(f"Link: https://lichess.org/{game_id}")
 
     else:
