@@ -168,34 +168,6 @@ def extract_names_from_export(payload):
     return from_color("white"), from_color("black")
 
 
-def load_moves_into_board(board, moves_text, source_name):
-    board.reset()
-    if not moves_text:
-        return
-
-    for raw_token in moves_text.split():
-        token = raw_token.strip().strip("'\"")
-        if not token:
-            continue
-
-        # Ignore move numbers and game termination markers when present.
-        if token.endswith(".") or token in {"*", "1-0", "0-1", "1/2-1/2"}:
-            continue
-
-        try:
-            board.push_uci(token)
-            continue
-        except Exception:
-            pass
-
-        try:
-            board.push_san(token)
-            continue
-        except Exception:
-            print(f"[!] Skipping unparseable move token from {source_name}: {raw_token!r}")
-            break
-
-
 def analyse_and_print_position(engine, board, username, white, black, game_id):
     if not white or not black:
         return
@@ -276,7 +248,10 @@ def fallback_poll_game(game_id, token, username, engine_path, interval_seconds=1
             white, black = extract_names_from_export(payload)
 
             moves = payload.get("moves", "")
-            load_moves_into_board(board, moves, f"export polling {game_id}")
+            board.reset()
+            if moves:
+                for move in moves.split():
+                    board.push_uci(move)
 
             position_key = (len(board.move_stack), board.turn)
             if position_key != last_position_key:
@@ -335,15 +310,21 @@ def stream_game(game_id, token, username, engine_path, is_bot_account):
                         continue
 
                     if event_type == "gameFull":
+                        board.reset()
                         moves = event.get("state", {}).get("moves", "")
-                        load_moves_into_board(board, moves, f"stream gameFull {game_id}")
+                        if moves:
+                            for move in moves.split():
+                                board.push_uci(move)
 
                         white = player_name(event.get("white"))
                         black = player_name(event.get("black"))
 
                     elif event_type == "gameState":
+                        board.reset()
                         moves = event.get("moves", "")
-                        load_moves_into_board(board, moves, f"stream gameState {game_id}")
+                        if moves:
+                            for move in moves.split():
+                                board.push_uci(move)
 
                     else:
                         continue
