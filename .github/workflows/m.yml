@@ -1,0 +1,62 @@
+name: Lichess Team Blitz Filter
+
+on:
+  workflow_dispatch:
+    inputs:
+      team_id:
+        description: "Enter Lichess Team ID"
+        required: true
+        type: string
+
+jobs:
+  filter-team:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Fetch and Filter Team Members
+        run: |
+          TEAM_ID="${{ github.event.inputs.team_id }}"
+          OUTPUT_FILE="filtered_players.txt"
+          > $OUTPUT_FILE
+
+          echo "Fetching team members..."
+
+          PAGE=1
+          while true; do
+            RESPONSE=$(curl -s "https://lichess.org/api/team/$TEAM_ID/users?page=$PAGE")
+
+            # Break if empty
+            if [ -z "$RESPONSE" ]; then
+              break
+            fi
+
+            COUNT=$(echo "$RESPONSE" | jq length)
+            if [ "$COUNT" -eq 0 ]; then
+              break
+            fi
+
+            echo "$RESPONSE" | jq -r '
+              .[] |
+              select(
+                .perfs.blitz.rating >= 2000 and
+                .perfs.blitz.prov == false
+              ) |
+              .username
+            ' >> $OUTPUT_FILE
+
+            PAGE=$((PAGE+1))
+          done
+
+          echo "Done. Filtered players saved in $OUTPUT_FILE"
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: blitz-2000-plus
+          path: filtered_players.txt
