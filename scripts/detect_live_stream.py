@@ -184,7 +184,7 @@ def analyse_and_print_position(engine, board, username, white, black, game_id):
 
         info = engine.analyse(
             board,
-            chess.engine.Limit(time=0.8),
+            chess.engine.Limit(time=0.5),
             multipv=3
         )
 
@@ -227,7 +227,7 @@ def analyse_and_print_position(engine, board, username, white, black, game_id):
         print(f"Opponent:    {opponent}")
 
 
-def fallback_poll_game(game_id, token, username, engine_path, interval_seconds=1.0):
+def fallback_poll_game(game_id, token, username, engine_path, interval_seconds=0.8):
     headers = auth_headers(token)
     board = chess.Board()
     last_position_key = None
